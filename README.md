@@ -69,4 +69,5 @@ No labeled satellite test image/reference data is currently bundled, so this rep
 
 Python 3.14.7 project environment and dependencies have been installed (`pip check` is clean). The real checkpoint loads successfully on CPU. Inference was smoke-tested on deterministic synthetic RGB inputs, and change pipelines were smoke-tested on synthetic non-georeferenced PNG and georeferenced GeoTIFF inputs. Streamlit `AppTest` reported zero exceptions; the server health endpoint returned `200 ok`. Inference against an actual satellite sample was not run because no sample image was available locally. Latest pytest run: 15 passed.
 #   O R B I T R O N - p r o j e c t _ P L A T I M U S  
+ #   O R B I T R O N - p r o j e c t _ P L A T I M U S  
  
