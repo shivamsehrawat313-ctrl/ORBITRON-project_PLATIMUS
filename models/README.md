@@ -1,5 +1,17 @@
 # Building segmentation checkpoint
 
+## LEVIR-CD change checkpoint
+
+- Model: BIT bi-temporal change detector exported to ONNX, trained for LEVIR-CD.
+- Source: [checkpoint and model card](https://huggingface.co/LEEhyeongsuk/BIT-LEVIR-CD), based on the [official BIT implementation](https://github.com/justchenhao/BIT_CD).
+- License: non-commercial use only, as stated by the checkpoint repository.
+- Inputs: paired RGB tensors per 256x256 crop, normalized from uint8 [0,255] to [-1,1]. Larger images are processed as overlapping native-resolution crops and probability mosaics.
+- Output: `change_map`, shape `[1,2,256,256]`, two-class logits. The application applies softmax and uses class 1 as the changed probability.
+- File: `models/BIT_LEVIR.onnx`, 12,638,542 bytes, SHA-256 `edf413687700d765eef6e6af6b7d7dc101738707255ea6e112898a1f4e52af9b`.
+- Setup: `python scripts/download_levir_change_model.py`.
+
+This model produces the change mask and label-based pixel metrics. The SpaceNet model documented below continues to provide per-date building outlines/counts; those counts have not been validated on LEVIR imagery.
+
 ## Selected checkpoint
 
 - Model: DeepLabV3 with a ResNet-50 backbone, one-channel building-logit output.

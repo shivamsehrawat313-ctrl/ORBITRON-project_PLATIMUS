@@ -17,6 +17,7 @@ class ImageInfo:
     pixel_size: tuple | None = None
     transform: tuple | None = None
     georeferenced: bool = False
+    georeference_source: str | None = None
     warnings: list[str] | None = None
     def to_dict(self): return asdict(self)
 
@@ -38,7 +39,8 @@ def inspect_image(source: Any, filename: str | None = None) -> ImageInfo:
             if not geo: warnings.append("No usable CRS/affine transform; geographic measurements unavailable.")
             return ImageInfo(Path(name).name, ds.width, ds.height, ds.count,
                 ",".join(ds.dtypes), crs, tuple(ds.bounds), tuple(ds.res),
-                transform=tuple(ds.transform),georeferenced=geo,warnings=warnings)
+                transform=tuple(ds.transform),georeferenced=geo,
+                georeference_source="embedded GeoTIFF metadata" if geo else None,warnings=warnings)
     try:
         from PIL import Image
         with Image.open(source) as im:

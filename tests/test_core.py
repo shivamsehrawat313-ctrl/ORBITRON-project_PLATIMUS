@@ -13,12 +13,16 @@ from src.preprocessing import tile_windows
 from src.image_validation import ImageInfo,compare_metadata
 from src.image_alignment import alignment_diagnostic
 from src.image_alignment import estimate_translation
-from src.analysis_pipeline import validate_comparison,run_analysis
+from src.analysis_pipeline import validate_comparison,run_analysis,render_change_overlay,_apply_registration_gate
 from src.building_detector import BuildingDetector,ModelUnavailable
 from src.change_detection import compare_footprints
-from src.export_utils import csv_bytes,geojson_bytes
+from src.export_utils import (csv_bytes,geojson_bytes,mask_png_bytes,
+    prediction_polygons_json_bytes)
 from src.footprint_extraction import mask_to_features
-from src.metrics import binary_metrics
+from src.metrics import binary_metrics,summarize_change_area
+from src.reference_labels import decode_change_label
+from src.geospatial_sidecar import attach_levir_coordinates
+from src.change_detector import LevirChangeDetector
 
 def geoinfo(filename,*,crs="EPSG:32643",bounds=(0,0,64,64),pixel=(1,-1),transform=None,width=64,height=64,geo=True):
     return ImageInfo(filename,width,height,3,"uint8",crs if geo else None,bounds if geo else None,
@@ -60,6 +64,20 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(result["reliable"])
         self.assertEqual(abs(result["shift_x_pixels"]),5)
         self.assertEqual(result["shift_y_pixels"],0)
+
+    def test_confirmed_pixel_space_can_continue_with_shift_warning(self):
+        alignment={"mode":"pixel-space","warnings":[]}
+        registration={"shift_x_pixels":3,"shift_y_pixels":0,"pixel_precision":1,"reliable":True}
+        result,checked=_apply_registration_gate(alignment,registration,True)
+        self.assertFalse(checked["reliable"])
+        self.assertTrue(any("no correction was applied" in w for w in result["warnings"]))
+
+    def test_unconfirmed_pixel_shift_and_geospatial_shift_still_block(self):
+        registration={"shift_x_pixels":3,"shift_y_pixels":0,"pixel_precision":1,"reliable":True}
+        with self.assertRaisesRegex(ValueError,"3px shift"):
+            _apply_registration_gate({"mode":"pixel-space","warnings":[]},registration,False)
+        with self.assertRaisesRegex(ValueError,"3px shift"):
+            _apply_registration_gate({"mode":"geospatial","warnings":[]},registration,True)
 
     def test_extraction_keeps_minimum_area_in_pixels_and_confidence(self):
         mask=np.zeros((12,12),dtype=np.uint8); mask[2:7,3:8]=1
@@ -105,10 +123,84 @@ class CoreTests(unittest.TestCase):
         self.assertIn(b"category",csv_bytes([{"category":"new"}]))
         m=binary_metrics([1,1,0,0],[1,0,0,0])
         self.assertAlmostEqual(m["false_positive_rate"],1/3)
+        self.assertAlmostEqual(m["precision"],.5)
+        self.assertAlmostEqual(m["recall"],1.0)
+        self.assertAlmostEqual(m["f1"],2/3)
+        self.assertAlmostEqual(m["iou"],.5)
+        self.assertEqual(m["counts"],{"tp":1,"fp":1,"fn":0,"tn":2})
         with self.assertRaises(ValueError): binary_metrics([1],[1,0])
+
+    def test_region_change_percentage_uses_valid_common_pixels(self):
+        changed=np.array([[1,1,0],[0,1,1]],dtype=bool)
+        valid=np.array([[1,1,1],[1,1,0]],dtype=bool)
+        result=summarize_change_area(changed,valid)
+        self.assertEqual(result["changed_pixels"],3)
+        self.assertEqual(result["valid_pixels"],5)
+        self.assertAlmostEqual(result["percent_of_region"],60.0)
+        self.assertEqual(summarize_change_area(changed,np.zeros_like(valid))["percent_of_region"],0.0)
+
+    def test_change_label_decoding_and_dimensions(self):
+        from PIL import Image
+        data=io.BytesIO(); Image.fromarray(np.array([[0,255],[0,1]],dtype=np.uint8)).save(data,format="PNG")
+        decoded=decode_change_label(data.getvalue(),"val_1.png",(2,2))
+        np.testing.assert_array_equal(decoded,[[False,True],[False,True]])
+        with self.assertRaisesRegex(ValueError,"matching label"):
+            decode_change_label(data.getvalue(),"wrong.png",(3,2))
+        with self.assertRaisesRegex(ValueError,"PNG"):
+            decode_change_label(data.getvalue(),"label.jpg",(2,2))
+
+    def test_levir_coordinate_sidecar_requires_exact_name_and_valid_bounds(self):
+        import json
+        info=geoinfo("val_1.png",geo=False,width=100,height=50)
+        sidecar=json.dumps({"val_1.png":[-98.0,30.0,-97.0,29.0]}).encode()
+        located=attach_levir_coordinates(info,sidecar,"LEVIR_CD_name_coords.json")
+        self.assertTrue(located.georeferenced)
+        self.assertEqual(located.crs,"EPSG:4326")
+        self.assertIn("val_1.png",located.georeference_source)
+        self.assertAlmostEqual(located.pixel_size[0],.01)
+        self.assertAlmostEqual(located.pixel_size[1],-.02)
+        with self.assertRaisesRegex(ValueError,"exact sample filename"):
+            attach_levir_coordinates(info,json.dumps({"train_1.png":[-98,30,-97,29]}).encode(),"coords.json")
+        with self.assertRaisesRegex(ValueError,"Invalid WGS84 bounds"):
+            attach_levir_coordinates(info,json.dumps({"val_1.png":[-200,30,-97,29]}).encode(),"coords.json")
+
+    def test_prediction_overlay_and_pixel_polygon_export(self):
+        from shapely.geometry import box
+        rgb=np.full((12,12,3),100,dtype=np.uint8)
+        building=[{"geometry":box(2,2,10,10),"confidence":.9}]
+        change=[{"geometry":box(4,4,8,8),"confidence":None}]
+        overlay=render_change_overlay(rgb,building,change,[box(2,2,10,10)],change_opacity=.10)
+        self.assertEqual(overlay.shape,rgb.shape)
+        # The interior change fill is subtle (10% red), not an opaque red mask.
+        self.assertGreater(int(overlay[5,5,0]),int(overlay[5,5,1]))
+        self.assertLess(int(overlay[5,5,0])-100,40)
+        payload=json.loads(prediction_polygons_json_bytes(building,building,change))
+        self.assertEqual(payload["coordinate_space"],"image_pixel_coordinates")
+        self.assertEqual([f["properties"]["kind"] for f in payload["features"]],
+                         ["before","after","changed_region"])
+        from PIL import Image
+        encoded=mask_png_bytes(np.array([[0,1]],dtype=bool))
+        with Image.open(io.BytesIO(encoded)) as im:
+            np.testing.assert_array_equal(np.asarray(im.convert("L")),[[0,255]])
 
     def test_missing_model_is_explicit(self):
         with self.assertRaises(ModelUnavailable): BuildingDetector("missing-file.pth").load()
+
+    def test_levir_detector_preprocessing_contract(self):
+        rgb=np.zeros((256,256,3),dtype=np.uint8)
+        tensor=LevirChangeDetector._preprocess(rgb)
+        self.assertEqual(tensor.shape,(1,3,256,256))
+        self.assertEqual(float(tensor.min()),-1.0)
+        self.assertEqual(float(tensor.max()),-1.0)
+
+    @unittest.skipUnless(Path("models/BIT_LEVIR.onnx").is_file(),"download LEVIR change weights for inference smoke test")
+    def test_real_levir_change_checkpoint_inference_smoke(self):
+        model=LevirChangeDetector("models/BIT_LEVIR.onnx").load()
+        image=np.random.default_rng(17).integers(0,255,(300,400,3),dtype=np.uint8)
+        probability,mask=model.predict_pair(image,image.copy())
+        self.assertEqual(probability.shape,(300,400)); self.assertEqual(mask.shape,(300,400))
+        self.assertTrue(np.isfinite(probability).all())
+        self.assertTrue(((probability>=0)&(probability<=1)).all())
 
     @unittest.skipUnless(Path("models/best_deeplab.pth").is_file(),"download real checkpoint for integration smoke test")
     def test_real_checkpoint_inference_smoke(self):
@@ -130,11 +222,27 @@ class CoreTests(unittest.TestCase):
         up_b=SimpleNamespace(name="b.png",getvalue=lambda:buf_b.getvalue())
         info_a=geoinfo("a.png",geo=False); info_b=geoinfo("b.png",geo=False)
         detector=BuildingDetector("models/best_deeplab.pth").load()
-        result=run_analysis(up_a,up_b,info_a,info_b,detector,.5,True,date(2020,1,1),date(2021,1,1),tile_size=64,tile_overlap=16)
+        change_detector=(LevirChangeDetector("models/BIT_LEVIR.onnx").load()
+                         if Path("models/BIT_LEVIR.onnx").is_file() else None)
+        reference=np.zeros((64,64),dtype=bool); reference[8:12,9:14]=True
+        result=run_analysis(up_a,up_b,info_a,info_b,detector,.5,True,date(2020,1,1),date(2021,1,1),
+            tile_size=64,tile_overlap=16,reference_change_mask=reference,
+            change_detector=change_detector)
         self.assertEqual(result["alignment"]["mode"],"pixel-space")
         self.assertEqual(result["mask_before"].shape,(64,64))
         self.assertFalse(result["georeferenced"])
         self.assertEqual(len(result["records"]),len(result["features"]))
+        self.assertEqual(result["building_counts"]["before"],len(result["building_features_before"]))
+        self.assertEqual(result["building_counts"]["after"],len(result["building_features_after"]))
+        if change_detector:
+            self.assertEqual(result["change_model"],change_detector.model_name)
+            self.assertIsNotNone(result["change_probability"])
+        else:
+            np.testing.assert_array_equal(result["change_mask"],result["mask_before"] ^ result["mask_after"])
+        self.assertEqual(result["evaluation"]["valid_pixels"],64*64)
+        self.assertEqual(result["change_area"]["valid_pixels"],64*64)
+        self.assertAlmostEqual(result["change_area"]["percent_of_region"],
+            100*result["change_area"]["changed_pixels"]/(64*64))
 
     @unittest.skipUnless(Path("models/best_deeplab.pth").is_file(),"download real checkpoint for GeoTIFF integration smoke test")
     def test_geotiff_pipeline_and_wgs84_export(self):

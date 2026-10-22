@@ -3,6 +3,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 MODEL_CHECKPOINT = ROOT / "models" / "best_deeplab.pth"
+LEVIR_CHANGE_CHECKPOINT = ROOT / "models" / "BIT_LEVIR.onnx"
 MAX_UPLOAD_MB = 180
 DEFAULT_CONFIDENCE = 0.5
 DEFAULT_IOU = 0.25

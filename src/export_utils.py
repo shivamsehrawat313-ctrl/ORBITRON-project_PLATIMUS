@@ -30,3 +30,27 @@ def geojson_bytes(features, crs=None, georeferenced=False):
     return json.dumps(collection,allow_nan=False).encode("utf-8")
 
 def summary_json_bytes(summary): return json.dumps(summary,indent=2,default=str,allow_nan=False).encode("utf-8")
+
+def mask_png_bytes(mask):
+    """Encode a binary prediction as a downloadable grayscale PNG."""
+    from io import BytesIO
+    import numpy as np
+    from PIL import Image
+    raster=(np.asarray(mask,dtype=bool)*255).astype("uint8")
+    output=BytesIO(); Image.fromarray(raster,mode="L").save(output,format="PNG")
+    return output.getvalue()
+
+def prediction_polygons_json_bytes(features_before,features_after,change_features):
+    """Export extracted polygons in image pixel coordinates, never as fake GeoJSON."""
+    from shapely.geometry import mapping
+    result={"coordinate_space":"image_pixel_coordinates","crs":None,"features":[]}
+    for epoch,features in (("before",features_before),("after",features_after),("changed_region",change_features)):
+        for index,feature in enumerate(features,1):
+            geometry=feature.get("geometry")
+            if geometry is None or geometry.is_empty: continue
+            result["features"].append({
+                "type":"Feature","geometry":mapping(geometry),
+                "properties":{"kind":epoch,"id":f"{epoch}_{index}",
+                              "confidence":feature.get("confidence")},
+            })
+    return json.dumps(result,allow_nan=False).encode("utf-8")
