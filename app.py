@@ -1,7 +1,6 @@
 """Streamlit application for local building-footprint change analysis."""
 import hashlib
 import json
-from io import BytesIO
 from collections import Counter
 from datetime import date,timedelta
 
@@ -19,7 +18,6 @@ from src.export_utils import (csv_bytes,geojson_bytes,summary_json_bytes,
 from src.reference_labels import decode_change_label
 from src.geospatial_sidecar import attach_levir_coordinates
 from src.change_detector import LevirChangeDetector,ChangeModelUnavailable
-from src.satellite_provider import retrieve_satellite_pair
 
 st.set_page_config(page_title="Urban Sprawl Intelligence",page_icon="🛰️",layout="wide")
 st.title("🛰️ Urban Sprawl Intelligence")
@@ -67,74 +65,79 @@ def _inspect_upload(file):
 today=date.today()
 try: earlier_default=today.replace(year=today.year-1)
 except ValueError: earlier_default=today-timedelta(days=365)
-input_mode=st.radio("Image source",["Manual image upload","Find satellite images by location and dates"],horizontal=True,key="image_source_mode")
+input_mode=st.radio("Image source",["Manual image upload","Annual urbanization trend (Sentinel-2-derived)"],horizontal=True,key="image_source_mode")
 files=[]; infos=[]; dates=[]
-if input_mode=="Find satellite images by location and dates":
-    st.subheader("Option B · retrieve imagery by location and dates")
-    st.caption("Click the map to choose an area, then set the target dates. The app searches the public Earth Search catalog and retrieves matching RGB GeoTIFFs; no AWS credentials are required.")
+if input_mode=="Annual urbanization trend (Sentinel-2-derived)":
+    st.subheader("Annual urbanization trend Â· map-selected area")
+    st.caption("Click the map to choose an area. This reads Google's precomputed Sentinel-2-derived building estimates; it does not fetch original Sentinel-2 photographs.")
     import folium
+    import os
     from streamlit_folium import st_folium
-    selected_location=st.session_state.get("satellite_location")
-    map_center=selected_location or [20.0,0.0]
-    map_obj=folium.Map(location=map_center,zoom_start=12 if selected_location else 2,control_scale=True)
-    if selected_location: folium.Marker(selected_location,tooltip="Selected analysis center").add_to(map_obj)
-    map_state=st_folium(map_obj,key="satellite_area_map",height=360,use_container_width=True)
+    selected_location=st.session_state.get("annual_trend_location")
+    map_obj=folium.Map(location=selected_location or [20.5937,78.9629],zoom_start=12 if selected_location else 5,control_scale=True)
+    if selected_location:
+        folium.Marker(selected_location,tooltip="Selected trend center").add_to(map_obj)
+        map_radius_km=float(st.session_state.get("annual_radius_km",1.0))
+        folium.Circle(location=selected_location,radius=map_radius_km*1000,color="#ff4b4b",weight=2,fill=True,fill_color="#ff4b4b",fill_opacity=0.06,tooltip=f"Analysis boundary · {map_radius_km:g} km radius").add_to(map_obj)
+    result=st.session_state.get("annual_trend_result")
+    result_config=st.session_state.get("annual_trend_config")
+    map_config=(tuple(selected_location) if selected_location else (),
+        float(st.session_state.get("annual_radius_km",1.0)),
+        int(st.session_state.get("annual_start_year",2016)),
+        int(st.session_state.get("annual_end_year",2023)),
+        float(st.session_state.get("annual_presence_threshold",0.50)),
+        str(st.session_state.get("annual_ee_project",os.environ.get("EARTHENGINE_PROJECT",""))).strip())
+    if result and result_config and map_config==result_config:
+        for key,label in (("start","Start year building presence"),("end","End year building presence"),("changed","Changed built-up pixels")):
+            folium.TileLayer(tiles=result["tiles"][key],attr="Google Earth Engine Â· Google Research",name=label,overlay=True,control=True,show=(key=="changed")).add_to(map_obj)
+        folium.LayerControl(collapsed=False).add_to(map_obj)
+    map_state=st_folium(map_obj,key="annual_trend_map",height=400,use_container_width=True)
     clicked=(map_state or {}).get("last_clicked")
     if clicked:
         selected_location=[float(clicked["lat"]),float(clicked["lng"])]
-        st.session_state["satellite_location"]=selected_location
-    if selected_location:
-        st.caption(f"Selected center: {selected_location[0]:.5f}° latitude, {selected_location[1]:.5f}° longitude")
-    else:
-        st.info("Click the map to set the center of your area of interest.")
-    provider_choice=st.selectbox("Imagery provider",[
-        "Sentinel-2 · global coverage · 10 m pixels",
-        "NAIP · contiguous United States · sub-meter aerial imagery"])
-    provider="NAIP" if provider_choice.startswith("NAIP") else "Sentinel-2"
-    option_cols=st.columns(4)
-    radius_limit=0.6 if provider=="NAIP" else 10.0
-    with option_cols[0]: radius_km=st.number_input("Area radius (km)",min_value=0.25,max_value=radius_limit,value=min(0.5,radius_limit) if provider=="NAIP" else 1.0,step=0.1 if provider=="NAIP" else 0.25)
-    with option_cols[1]: date_a=st.date_input("Earlier target date",value=earlier_default,key="provider_date_a")
-    with option_cols[2]: date_b=st.date_input("Later target date",value=today,key="provider_date_b")
-    with option_cols[3]:
-        tolerances=[365,730,1095] if provider=="NAIP" else [0,7,14,30,60,90]
-        window_days=st.selectbox("Date tolerance",tolerances,index=0 if provider=="NAIP" else 3,
-            format_func=lambda n:f"±{n} days" if n<365 else f"±{n//365} years")
-    max_cloud=st.slider("Maximum scene cloud cover",0,80,20,5) if provider=="Sentinel-2" else 100.0
-    current_config=(tuple(selected_location) if selected_location else None,float(radius_km),date_a,date_b,int(window_days),float(max_cloud),provider)
-    if st.button("Search and retrieve image pair",type="primary",disabled=selected_location is None or date_a>=date_b):
+        st.session_state["annual_trend_location"]=selected_location
+    if selected_location: st.caption(f"Selected point: {selected_location[0]:.5f}Â° latitude, {selected_location[1]:.5f}Â° longitude")
+    else: st.info("Click the map to choose a point. The map opens centered on India.")
+    ee_project=st.text_input("Google Cloud project ID registered for Earth Engine",value=os.environ.get("EARTHENGINE_PROJECT",""),key="annual_ee_project",help="Earth Engine API access and local authentication are required. Setup steps are in README.md.")
+    controls=st.columns(4)
+    with controls[0]: radius_km=st.number_input("Area radius (km)",min_value=0.25,max_value=3.0,value=1.0,step=0.25,key="annual_radius_km")
+    with controls[1]: start_year=st.selectbox("Start year",range(2016,2024),index=0,key="annual_start_year")
+    with controls[2]: end_year=st.selectbox("End year",range(2016,2024),index=7,key="annual_end_year")
+    with controls[3]: presence_threshold=st.slider("Building presence threshold",0.10,0.90,0.50,0.05,key="annual_presence_threshold",help="Model confidence is uncalibrated; this threshold is not a literal probability.")
+    st.caption("Annual dataset coverage: 2016–2023. A year is a modeled annual state, not an exact satellite acquisition date.")
+    config=(tuple(selected_location) if selected_location else (),float(radius_km),int(start_year),int(end_year),float(presence_threshold),ee_project.strip())
+    if st.button("Calculate annual trend",type="primary",disabled=not selected_location or start_year>=end_year):
         try:
-            with st.spinner("Searching Sentinel-2 scenes and preparing a shared grid…"):
-                raw_a,raw_b,meta_a,meta_b=retrieve_satellite_pair(selected_location[1],selected_location[0],radius_km,date_a,date_b,window_days,max_cloud,provider)
-            st.session_state["satellite_pair"]={"config":current_config,"raw_a":raw_a,"raw_b":raw_b,"meta_a":meta_a,"meta_b":meta_b}
-        except Exception as exc:
-            st.error(f"Satellite retrieval failed: {exc}")
-    pair=st.session_state.get("satellite_pair")
-    if pair and pair.get("config")==current_config:
-        st.success(f"Two {provider} observations retrieved and aligned onto a shared geospatial grid.")
-        for title,meta in (("Observation A",pair["meta_a"]),("Observation B",pair["meta_b"])):
-            cloud_caption=f" · {meta['cloud_cover']:.1f}% catalog cloud" if provider=="Sentinel-2" else ""
-            st.caption(f"{title}: {meta['acquired'][:10]}{cloud_caption} · {meta['item_id']}")
-        files=[type("SatelliteUpload",(),{"name":name,"size":len(raw),"getvalue":lambda self,data=raw:data})()
-               for name,raw in (("sentinel_before.tif",pair["raw_a"]),("sentinel_after.tif",pair["raw_b"]))]
-        infos=[inspect_image(BytesIO(pair["raw_a"]),"sentinel_before.tif"),inspect_image(BytesIO(pair["raw_b"]),"sentinel_after.tif")]
-        dates=[date.fromisoformat(pair["meta_a"]["acquired"][:10]),date.fromisoformat(pair["meta_b"]["acquired"][:10])]
-        if provider=="Sentinel-2":
-            st.warning("Sentinel-2 RGB pixels are 10 m. This supports broad land-cover change, but individual houses may be smaller than one pixel. The building model was trained on much sharper imagery, so its building counts and outlines may be unreliable for these inputs.")
-        else:
-            st.warning("NAIP is high-resolution U.S. aerial imagery (not satellite imagery), with acquisition dates that vary by location and may be years apart. Its detail is more suitable for inspecting buildings, but neither model was validated on NAIP, so scores and counts still require ground-truth labels.")
-        import rasterio
-        from rasterio.io import MemoryFile
-        previews=[]
-        for raw in (pair["raw_a"],pair["raw_b"]):
-            with MemoryFile(raw) as mem:
-                with mem.open() as raster: previews.append(raster.read([1,2,3]).transpose(1,2,0))
-        preview_cols=st.columns(2)
-        preview_cols[0].image(previews[0],caption=f"Retrieved A · {pair['meta_a']['acquired'][:10]}",use_container_width=True)
-        preview_cols[1].image(previews[1],caption=f"Retrieved B · {pair['meta_b']['acquired'][:10]}",use_container_width=True)
-    else:
-        if pair: st.info("Selection changed. Search again to retrieve imagery for the current area and dates.")
-        files=[None,None]; infos=[None,None]; dates=[date_a,date_b]
+            from src.annual_trend import retrieve_annual_trend
+            with st.spinner("Querying Open Buildings annual data and calculating the trend…"):
+                trend=retrieve_annual_trend(ee_project,selected_location[0],selected_location[1],radius_km,start_year,end_year,presence_threshold)
+            st.session_state["annual_trend_result"]=trend
+            st.session_state["annual_trend_config"]=config
+            st.rerun()
+        except Exception as exc: st.error(f"Annual trend could not be calculated: {exc}")
+    trend=st.session_state.get("annual_trend_result")
+    if trend and st.session_state.get("annual_trend_config")==config:
+        st.subheader(f"Estimated built-up trend Â· {start_year}–{end_year}")
+        st.warning("These are model-derived estimates, not verified building counts. Open Buildings confidence is uncalibrated and may vary across years; use local reference data before making strong claims.")
+        metrics=st.columns(5)
+        metrics[0].metric(f"Estimated building count Â· {start_year}",f"{trend['start_count']:,.1f}")
+        metrics[1].metric(f"Estimated building count Â· {end_year}",f"{trend['end_count']:,.1f}")
+        metrics[2].metric("Estimated net count change",f"{trend['net_count_change']:+,.1f}")
+        metrics[3].metric("Built-up area change",f"{trend['built_area_change_percent']:+.2f}%" if trend["built_area_change_percent"] is not None else "N/A")
+        metrics[4].metric("Annualized built-up area growth",f"{trend['annualized_built_area_growth_percent']:+.2f}% / yr" if trend["annualized_built_area_growth_percent"] is not None else "N/A")
+        changes=st.columns(3)
+        changes[0].metric("New built-up footprint area",f"{trend['added_built_area_m2']:,.0f} mÂ²")
+        changes[1].metric("No-longer-detected area",f"{trend['removed_built_area_m2']:,.0f} mÂ²")
+        changes[2].metric("Changed area share",f"{trend['changed_area_percent']:.2f}%")
+        st.caption(f"Changed area share = (new + no-longer-detected built-up pixels) Ã· valid compared area Ã— 100. Valid area: {trend['valid_area_m2']:,.0f} mÂ². Areas are raster pixels, not distinct building counts.")
+        table=pd.DataFrame(trend["yearly"]).rename(columns={"year":"Year","estimated_buildings":"Estimated building count","building_count_change":"Building count change vs prior year","building_count_change_percent":"Building count change vs prior year (%)","built_area_m2":"Estimated built-up area (mÂ²)","built_area_change_m2":"Built-up area change vs prior year (mÂ²)","built_area_change_percent":"Built-up area change vs prior year (%)"})
+        st.line_chart(table.set_index("Year")[["Estimated building count"]])
+        st.line_chart(table.set_index("Year")[["Estimated built-up area (mÂ²)"]])
+        st.dataframe(table,use_container_width=True,hide_index=True)
+        st.download_button("Download annual trend CSV",table.to_csv(index=False).encode("utf-8"),file_name="urban_sprawl_annual_trend.csv",mime="text/csv")
+        st.caption("Map layers show Google Open Buildings Temporal model rasters, not the original Sentinel-2 scenes. See README.md for source and limitations.")
+    elif trend: st.info("The location or analysis settings changed. Recalculate to update this result.")
+    st.stop()
 else:
     columns=st.columns(2)
     files=[]; infos=[]; dates=[]
