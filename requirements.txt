@@ -13,5 +13,6 @@ pandas>=2
 plotly>=5
 folium>=0.16
 streamlit-folium>=0.20
+earthengine-api>=1.5
 requests>=2.31
 pytest>=8

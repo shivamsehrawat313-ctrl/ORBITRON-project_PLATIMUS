@@ -76,12 +76,34 @@ LEVIR-CD imagery is PNG and has no embedded CRS or pixel transform. To attach co
 
 The reported changed-region share is `BIT predicted changed pixels / valid comparison pixels × 100`. It is a changed-pixel share, not building-count growth. Building counts are connected mask components from the separate SpaceNet model and may merge touching roofs or split one roof into several detections. Ground-truth precision/recall/F1/IoU score the BIT pixel change mask; they do not establish building-count accuracy. The published BIT score is not a guarantee for an individual pair; evaluate representative held-out labels for the intended imagery.
 
-### Retrieve an image pair by location and dates (Option B)
+### Annual urbanization trend (map-selected option)
 
-Select **Find satellite images by location and dates**, click the map to set the area center, choose the two target dates, set a date tolerance and click **Search and retrieve image pair**. The app uses the public [Earth Search STAC catalog](https://earth-search.aws.element84.com/v1/) and reads RGB cloud-optimized GeoTIFF assets directly; no AWS access key is required. Choose Sentinel-2 for global coverage and set a cloud-cover limit. For locations in the contiguous U.S., choose NAIP for higher-resolution aerial imagery. NAIP is not satellite imagery; it is typically acquired at least once every three years. Earth Search is a best-effort public service, so catalog/network availability is not guaranteed. Sentinel data are free to users under the [Copernicus data policy](https://dataspace.copernicus.eu/data-policy).
+Choose **Annual urbanization trend (Sentinel-2-derived)**, click an Indian location, select a radius and years from 2016–2023, then calculate. The app queries Google's [Open Buildings 2.5D Temporal V1](https://developers.google.com/earth-engine/datasets/catalog/GOOGLE_Research_open-buildings-temporal_v1) collection in Earth Engine. This is a precomputed model product derived from Sentinel-2, not the original Sentinel-2 photos or fresh inference in this app. It provides annual building-presence, fractional-count, and height rasters at about 4 m effective resolution and includes South Asia.
 
-Retrieved observations are cut to the selected square AOI and resampled onto a shared projected grid. Dates shown after retrieval are actual acquisition dates, which can differ from the requested target dates. Increase the date tolerance if the catalog returns no scene; Sentinel-2 also lets you increase the cloud-cover limit. Its cloud percentage describes the source scene, not a precise cloud mask for the selected chip. Sentinel-2 RGB is 10 m per pixel, suitable for broad land-cover changes but too coarse for many individual houses. NAIP is sub-meter aerial imagery and has better visual detail for buildings, but the existing SpaceNet/LEVIR models were not validated on NAIP either. Do not claim building-count accuracy from either source without matching labels and evaluation. The retrieved GeoTIFFs contain CRS and affine transform metadata and feed the normal pipeline.
+The app shows annual estimated building count and built-up area, year-over-year count/area changes, net count change, thresholded new/removed built-up pixel areas, changed-area share, map layers, and a CSV. It also reports total area change and annualized area growth for the selected period. The fractional-count band is aggregated into an approximate count estimate. New/removed areas are raster areas, not counts of distinct new/demolished buildings. Confidence values are uncalibrated and may shift with cloud cover, alignment, and other conditions; no accuracy percentage is claimed without matching reference labels. Dataset years stop at 2023. Licenses are CC-BY 4.0 or ODbL; attribute the data if you reuse it.
 
+#### One-time Earth Engine setup on Windows
+
+1. Register a Google Cloud project for Earth Engine and enable the Earth Engine API using Google's [Earth Engine access instructions](https://developers.google.com/earth-engine/guides/access). Individual project registration and Google authentication are required; no AWS key is used.
+2. Install the updated project dependencies:
+
+   ~~~powershell
+   .\.venv-py314\Scripts\python.exe -m pip install -r requirements.txt
+   ~~~
+
+3. Authenticate once in the same Windows account that will run Streamlit:
+
+   ~~~powershell
+   .\.venv-py314\Scripts\earthengine.exe authenticate
+   ~~~
+
+4. Run Streamlit as usual. Copy the **Cloud Project ID** (not its display name) into the app's project-ID field, then click the map location and calculate.
+
+For each trial, use the same radius and threshold for every year. Start with a 0.5–1 km radius and a multi-year span such as 2016–2023. Candidate exploratory sites in India include Kokapet, Hyderabad (17.3955, 78.3347), Whitefield, Bengaluru (12.9698, 77.7500), and the Dwarka Expressway area, Gurugram (28.4100, 76.9900). Try 2016–2023, then inspect intermediate annual values; these are sample AOIs, not guaranteed ground-truth sites.
+
+### Manual two-image workflow
+
+Choose **Manual image upload** to keep using the existing A/B upload and comparison workflow. It still accepts the same image formats and uses the currently configured local models; the annual dataset workflow does not change those predictions.
 ## Troubleshooting and limits
 
 - Model unavailable: run the weight download command and check the recorded file size/SHA-256 in `models/README.md`.
